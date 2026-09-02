@@ -1,0 +1,45 @@
+# Local environments and Python caches
+.venv/
+venv/
+env/
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Local/editor and OS metadata
+.DS_Store
+.idea/
+.vscode/
+
+# External/local-only resources
+HyperSIGMA_adapted
+datasets/Houston
+
+# Datasets and generated artifacts
+*.mat
+*.h5
+*.hdf5
+*.npz
+*.npy
+*.pkl
+*.pickle
+*.pt
+*.pth
+*.ckpt
+*.onnx
+*.bin
+*.ckpt
+*.log
+
+# Large demo/media assets and notebooks
+*.ipynb
+*.png
+*.jpg
+*.jpeg
+*.gif
+*.bmp
+*.tif
+*.tiff
+
+# Front-end generated/static bundles copied from upstream
+third_party/HyperSIGMA/static/
