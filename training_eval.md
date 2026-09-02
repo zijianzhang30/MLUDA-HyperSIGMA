@@ -201,11 +201,13 @@ CUDA_VISIBLE_DEVICES=1 .venv/bin/python -u eval_mluDA_fspec_proto_kd.py \
   --checkpoint /nas1/zhangzj26/HyperSIGMA_adapted/mluda_fspec_proto_kd/lambda_0.1/seed_1174_best.pth
 ```
 
-seed 1174 初步结果：
+第一版试跑曾误用全部 source cache（包含 source-val）计算 prototypes，结果已废弃；随后已按严格协议改为仅使用当前 seed 的每类 180 个 source-train 样本，并覆盖 checkpoint/日志。
+
+严格 source-train-only 的 seed 1174 结果：
 
 | 设置 | OA | AA | Kappa |
 |---|---:|---:|---:|
 | 同 seed λ=0 对照 | 74.17% | 66.86% | 55.35% |
-| Source-only prototype KD | 76.71% | 69.58% | 62.07% |
+| Source-only prototype KD | 73.97% | 71.58% | 58.09% |
 
-prototype KD 的 source-val best 为 epoch 96，val accuracy 93.94%；训练 KD loss 从约 0.76 降至 0.37。单 seed 的 OA/AA/Kappa 均高于同 seed λ=0，但不能据此宣称稳定提升。teacher prototype 的 source top-1 归属准确率仅约 39.4%，部分类别 prototype cosine 高达约 0.99，说明 F_spec prototype 本身仍有明显类别混叠；因此先停在单 seed 正确性检查，不据 Houston18 结果继续调 temperature 或 λ。
+prototype KD 的 source-val best 为 epoch 60，val accuracy 91.73%；训练 KD loss 从约 0.76 降至约 0.37。相对同 seed λ=0，AA 上升约 4.7 个百分点，但 OA/Kappa 下降，说明单 seed 结果不稳定。仅用 source-train 构建的 teacher prototypes，source top-1 归属准确率约 44.4%，部分类别 prototype cosine 仍高达约 0.99，说明 F_spec prototype 仍有明显类别混叠；因此先不扩展到多 seed，也不据 Houston18 结果调 temperature 或 λ。
