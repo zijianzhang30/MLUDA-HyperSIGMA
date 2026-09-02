@@ -1,5 +1,5 @@
 """Post-hoc Houston18 audit for one prototype-KD checkpoint."""
-import argparse, json, sys
+import argparse, json, sys, re
 from pathlib import Path
 import hdf5storage, numpy as np, torch
 from sklearn import metrics
@@ -22,5 +22,6 @@ def main():
         for s in range(0,len(tx),BATCH_SIZE): pred.append(m(ref[:min(BATCH_SIZE,len(tx)-s)],torch.from_numpy(tx[s:s+BATCH_SIZE]).to(dev))[8].argmax(1).cpu().numpy())
     pred=np.concatenate(pred); cm=metrics.confusion_matrix(y,pred,labels=np.arange(CLASS_NUM)); pc=np.diag(cm)/np.maximum(cm.sum(1),1)
     out={'checkpoint':str(a.checkpoint),'target_gt_used_for_training_or_selection':False,'n':int(len(y)),'oa':float((y==pred).mean()),'aa':float(pc.mean()),'kappa':float(metrics.cohen_kappa_score(y,pred,labels=np.arange(CLASS_NUM))),'per_class_accuracy':pc.tolist(),'prediction_distribution':np.bincount(pred,minlength=CLASS_NUM).tolist(),'confusion_matrix':cm.tolist()}
-    outp=a.checkpoint.parent/'houston18_posthoc.json'; outp.write_text(json.dumps(out,indent=2)); print(json.dumps(out,indent=2))
+    match = re.search(r'seed_(\d+)_best', a.checkpoint.name); suffix = f"_seed_{match.group(1)}" if match else ""
+    outp=a.checkpoint.parent/f'houston18_posthoc{suffix}.json'; outp.write_text(json.dumps(out,indent=2)); print(json.dumps(out,indent=2))
 if __name__=='__main__': main()

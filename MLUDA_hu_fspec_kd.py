@@ -119,7 +119,7 @@ def target_eval(model, target_x, target_y, source_ref, device):
     return {"n": int(len(y)), "oa": float(np.mean(y == pred)), "aa": float(np.mean(pc)), "kappa": float(metrics.cohen_kappa_score(y, pred, labels=np.arange(CLASS_NUM))), "per_class_accuracy": pc.tolist(), "prediction_distribution": np.bincount(pred, minlength=CLASS_NUM).tolist(), "confusion_matrix": cm.tolist()}
 
 
-def run_seed(lam, seed, data_s, data_t, label_s, target_centers, source_map, teacher_cache, device, out, num_epochs):
+def run_seed(lam, seed, data_s, data_t, label_s, target_centers, source_map, teacher_cache, device, out, num_epochs, source_only_kd=False):
     utils.set_seed(seed)
     train_c, train_x, _, train_y, val_c, val_x, _, val_y = paired_source_samples(data_s, data_s, label_s, seed)
     # Teacher cache is indexed by source center, generated from raw Full48.
@@ -161,7 +161,7 @@ def run_seed(lam, seed, data_s, data_t, label_s, target_centers, source_map, tea
             scl_loss = con_s(all_source_con, source_label.cuda()) + con_t(all_target_con, pseudo_label_t)
             domain_loss = dsh(source_out, target_out)
             if lam > 0:
-                kd_s = cosine_kd(projection, source_spec, source_teacher.to(device)); kd_t = cosine_kd(projection, target_spec, target_teacher.to(device)); kd_loss = kd_s + kd_t
+                kd_s = cosine_kd(projection, source_spec, source_teacher.to(device)); kd_t = cosine_kd(projection, target_spec, target_teacher.to(device)); kd_loss = kd_s if source_only_kd else kd_s + kd_t
             else: kd_loss = source_outputs.new_zeros(())
             total_loss = cls_loss + 0.01 * lambd * lmmd_loss + scl_loss + domain_loss + lam * kd_loss
             optimizer.zero_grad(); total_loss.backward(); optimizer.step()
@@ -178,8 +178,8 @@ def run_seed(lam, seed, data_s, data_t, label_s, target_centers, source_map, tea
 
 
 def main():
-    ap = argparse.ArgumentParser(); ap.add_argument("--lambda-kd", type=float, required=True, choices=(0.0, 0.05, 0.1, 0.2)); ap.add_argument("--device", default="cuda:0" if torch.cuda.is_available() else "cpu"); ap.add_argument("--epochs", type=int, default=epochs); ap.add_argument("--seeds", type=int, nargs="*", default=seeds); ap.add_argument("--cache", type=Path, default=CACHE)
-    args = ap.parse_args(); device = torch.device(args.device); out = OUT_ROOT / f"lambda_{args.lambda_kd:g}"; out.mkdir(parents=True, exist_ok=True)
+    ap = argparse.ArgumentParser(); ap.add_argument("--lambda-kd", type=float, required=True, choices=(0.0, 0.05, 0.1, 0.2)); ap.add_argument("--device", default="cuda:0" if torch.cuda.is_available() else "cpu"); ap.add_argument("--epochs", type=int, default=epochs); ap.add_argument("--seeds", type=int, nargs="*", default=seeds); ap.add_argument("--cache", type=Path, default=CACHE); ap.add_argument("--source-only-kd", action="store_true", help="use source point-wise KD only; omit target kd_t")
+    args = ap.parse_args(); device = torch.device(args.device); out_name = f"lambda_{args.lambda_kd:g}" + ("_source_only" if args.source_only_kd else ""); out = OUT_ROOT / out_name; out.mkdir(parents=True, exist_ok=True)
     cache_npz = np.load(args.cache, allow_pickle=False)
     src_centers = cache_npz["source_centers"]; tgt_centers = cache_npz["target_centers"]
     source_fspec = cache_npz["source_fspec"]; target_fspec = cache_npz["target_fspec"]
@@ -194,9 +194,9 @@ def main():
     data_s, data_t = ILDA(source, target, 2, 0.009)
     all_results = []
     for seed in args.seeds:
-        best, train_x, target_x, source_ref = run_seed(args.lambda_kd, seed, data_s, data_t, label_s, tgt_centers, source_map, teacher_cache, device, out, args.epochs)
+        best, train_x, target_x, source_ref = run_seed(args.lambda_kd, seed, data_s, data_t, label_s, tgt_centers, source_map, teacher_cache, device, out, args.epochs, args.source_only_kd)
         all_results.append({"seed": seed, "best_source": best})
-    (out / "source_training_summary.json").write_text(json.dumps({"lambda_kd": args.lambda_kd, "seeds": args.seeds, "target_gt_used_for_training_or_selection": False, "results": all_results}, indent=2))
+    (out / "source_training_summary.json").write_text(json.dumps({"lambda_kd": args.lambda_kd, "source_only_kd": args.source_only_kd, "seeds": args.seeds, "target_gt_used_for_training_or_selection": False, "results": all_results}, indent=2))
     print(json.dumps({"finished": True, "lambda_kd": args.lambda_kd, "artifact": str(out), "seeds": args.seeds}))
 
 

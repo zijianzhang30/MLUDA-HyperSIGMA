@@ -40,21 +40,21 @@ def extract(model, cube, centers, device, batch_size):
 
 
 def main():
-    ap = argparse.ArgumentParser(); ap.add_argument("--device", default="cuda:0" if torch.cuda.is_available() else "cpu"); ap.add_argument("--batch-size", type=int, default=64); ap.add_argument("--output", type=Path, default=OUT)
+    ap = argparse.ArgumentParser(); ap.add_argument("--device", default="cuda:0" if torch.cuda.is_available() else "cpu"); ap.add_argument("--batch-size", type=int, default=64); ap.add_argument("--output", type=Path, default=OUT); ap.add_argument("--checkpoint", type=Path, default=CKPT)
     args = ap.parse_args(); device = torch.device(args.device)
     src, src_gt = utils.load_data_houston(str(ROOT / "datasets/Houston/Houston13.mat"), str(ROOT / "datasets/Houston/Houston13_7gt.mat"))
     tgt, tgt_gt = utils.load_data_houston(str(ROOT / "datasets/Houston/Houston18.mat"), str(ROOT / "datasets/Houston/Houston18_7gt.mat"))
     src_centers = np.argwhere(src_gt > 0).astype(np.int64)
     tgt_centers = np.argwhere(tgt_gt > 0).astype(np.int64)
     model = SSFusionFramework(img_size=IMG_SIZE, in_channels=48, patch_size=2, classes=7, model_size="base")
-    ck = torch.load(CKPT, map_location="cpu"); model.load_state_dict(ck["model"], strict=True); model.to(device).eval()
+    ck = torch.load(args.checkpoint, map_location="cpu"); model.load_state_dict(ck["model"], strict=True); model.to(device).eval()
     for p in model.parameters(): p.requires_grad_(False)
     print(f"teacher frozen={all(not p.requires_grad for p in model.parameters())} source={len(src_centers)} target={len(tgt_centers)}")
     src_f = extract(model, src, src_centers, device, args.batch_size); tgt_f = extract(model, tgt, tgt_centers, device, args.batch_size)
     if not np.isfinite(src_f).all() or not np.isfinite(tgt_f).all(): raise RuntimeError("teacher F_spec contains NaN/Inf")
     args.output.parent.mkdir(parents=True, exist_ok=True)
-    np.savez(args.output, source_centers=src_centers, source_fspec=src_f, target_centers=tgt_centers, target_fspec=tgt_f)
-    print(f"saved={args.output} source_fspec={src_f.shape} target_fspec={tgt_f.shape}")
+    np.savez(args.output, source_centers=src_centers, source_fspec=src_f, target_centers=tgt_centers, target_fspec=tgt_f, teacher_checkpoint=str(args.checkpoint))
+    print(f"saved={args.output} checkpoint={args.checkpoint} source_fspec={src_f.shape} target_fspec={tgt_f.shape}")
 
 
 if __name__ == "__main__": main()

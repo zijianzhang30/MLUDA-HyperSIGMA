@@ -72,6 +72,21 @@ class DSANSS(nn.Module):
                 features_y, y1, y2, fea_y, output_y,
                 spectral_x, spectral_y)
 
+    def forward_with_spectral_spatial(self, x, y):
+        """MLUDA outputs plus pooled pre-MBCA spectral and spatial branches.
+
+        This additive API leaves ``forward`` and ``forward_with_spectral``
+        unchanged. Spatial is the 96-d conv branch and spectral is 192-d,
+        both pooled immediately before concatenation/CrossAttention.
+        """
+        features_x, features_y, spectral_x, spectral_y, spatial_x, spatial_y = self.feature_layers(
+            x, y, return_spectral=True, return_spatial=True)
+        x1 = F.normalize(self.head1(features_x), dim=1); x2 = F.normalize(self.head2(features_x), dim=1)
+        y1 = F.normalize(self.head1(features_y), dim=1); y2 = F.normalize(self.head2(features_y), dim=1)
+        return (features_x, x1, x2, self.fc1(features_x), self.sigmoid(self.fc2(features_x)),
+                features_y, y1, y2, self.fc1(features_y), self.sigmoid(self.fc2(features_y)),
+                spectral_x, spectral_y, spatial_x, spatial_y)
+
     def get_embedding(self, x):
         out, _, _, _, _ = self.forward(x)
         return out
@@ -237,7 +252,7 @@ class DCRN_02(nn.Module):
                 m.bias.data.zero_()
 
 
-    def forward(self, x, y, return_spectral=False):
+    def forward(self, x, y, return_spectral=False, return_spatial=False):
         x = x.unsqueeze(1)  # (64,1,100,9,9)
         x1 = self.conv1(x)
         x1 = self.activation1(self.bn1(x1))   
@@ -323,6 +338,10 @@ class DCRN_02(nn.Module):
             # spatial concat and CrossAttention (the MLUDA MBCA location).
             spectral_x = F.adaptive_avg_pool2d(spectral_x_raw, 1).flatten(1)
             spectral_y = F.adaptive_avg_pool2d(spectral_y_raw, 1).flatten(1)
+            if return_spatial:
+                spatial_x = F.adaptive_avg_pool2d(x2, 1).flatten(1)
+                spatial_y = F.adaptive_avg_pool2d(y2, 1).flatten(1)
+                return F_y2x, F_x2y, spectral_x, spectral_y, spatial_x, spatial_y
             return F_y2x, F_x2y, spectral_x, spectral_y
         return F_y2x,F_x2y
 
