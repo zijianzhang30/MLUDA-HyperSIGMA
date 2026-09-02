@@ -60,12 +60,12 @@ def main():
     source, src_gt = utils.load_data_houston(str(ROOT/'datasets/Houston/Houston13.mat'), str(ROOT/'datasets/Houston/Houston13_7gt.mat'))
     target = hdf5storage.loadmat(str(ROOT/'datasets/Houston/Houston18.mat'))['ori_data']; data_s, data_t = ILDA(source, target, 2, 0.009)
     train_c, train_x, _, train_y, val_c, val_x, _, val_y = paired_source_samples(data_s, data_s, src_gt, a.seed)
-    labels_cache = src_gt[src_centers[:,0], src_centers[:,1]].astype(np.int64) - 1
-    prototypes = np.stack([src_fspec[labels_cache == c].mean(0) for c in range(CLASS_NUM)]).astype(np.float32)
-    prototypes = F.normalize(torch.from_numpy(prototypes), dim=1).to(device)
-    # Only source samples are used for prototype KD. Target labels are never loaded.
     source_map = {(int(r), int(c)): i for i, (r, c) in enumerate(src_centers)}
     train_tf = np.stack([src_fspec[source_map[(int(r), int(c))]] for r, c in train_c]).astype(np.float32)
+    # Prototypes use only the same 180/class source-training split. Source-val
+    # labels and all Houston18 labels are excluded from training.
+    prototypes = np.stack([train_tf[train_y == c].mean(0) for c in range(CLASS_NUM)]).astype(np.float32)
+    prototypes = F.normalize(torch.from_numpy(prototypes), dim=1).to(device)
     train_loader = DataLoader(TensorDataset(torch.from_numpy(train_x), torch.from_numpy(train_tf), torch.from_numpy(train_y)), batch_size=BATCH_SIZE, shuffle=True, drop_last=True)
     val_loader = DataLoader(TensorDataset(torch.from_numpy(val_x), torch.from_numpy(val_y)), batch_size=BATCH_SIZE)
     target_x = center_patches(data_t, tgt_centers, 7); target_loader = DataLoader(torch.from_numpy(target_x), batch_size=BATCH_SIZE, shuffle=True, drop_last=True)

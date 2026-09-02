@@ -185,3 +185,27 @@ Houston18 仅作最终 post-hoc audit，10 seed mean ± std：
 - 暂不加入 `F_spat`、SEM fused `F*` KD，也不改 MBCA/SCL/LMMD。
 - 不使用 Houston18 GT 做训练、模型选择、early stopping、阈值或超参数调整。
 - 如果继续研究，应先分析 per-class/cross-domain margin 和 loss 曲线，再决定是否改进 teacher adaptation 或尝试更稳健的 feature alignment；不能根据当前 post-hoc target 指标反向调参。
+
+## 9. Source-only F_spec prototype KD（单 seed 初检）
+
+新增 `MLUDA_hu_fspec_proto_kd.py` 和 `eval_mluDA_fspec_proto_kd.py`。该版本不再逐点拟合 teacher feature，而是从全部 Houston13 非 background source F_spec 按 7 类计算 teacher prototypes；source batch 的 teacher/student feature 分别对同一组 prototypes 计算 temperature-softmax distribution，再使用 `KL(q_T || q_S)`。KD 只用于 source labeled batch，Houston18 GT 不参与训练或 checkpoint 选择。
+
+```bash
+CUDA_VISIBLE_DEVICES=1 .venv/bin/python -u MLUDA_hu_fspec_proto_kd.py \
+  --device cuda:0 --epochs 100 --seed 1174 --lambda-kd 0.1 --temperature 0.1 \
+  --cache /nas1/zhangzj26/HyperSIGMA_adapted/mluda_fspec_full48_cache.npz \
+  | tee /nas1/zhangzj26/TGRS_MLUDA-2024/mluda_fspec_proto_kd_seed1174.log
+
+CUDA_VISIBLE_DEVICES=1 .venv/bin/python -u eval_mluDA_fspec_proto_kd.py \
+  --device cuda:0 \
+  --checkpoint /nas1/zhangzj26/HyperSIGMA_adapted/mluda_fspec_proto_kd/lambda_0.1/seed_1174_best.pth
+```
+
+seed 1174 初步结果：
+
+| 设置 | OA | AA | Kappa |
+|---|---:|---:|---:|
+| 同 seed λ=0 对照 | 74.17% | 66.86% | 55.35% |
+| Source-only prototype KD | 76.71% | 69.58% | 62.07% |
+
+prototype KD 的 source-val best 为 epoch 96，val accuracy 93.94%；训练 KD loss 从约 0.76 降至 0.37。单 seed 的 OA/AA/Kappa 均高于同 seed λ=0，但不能据此宣称稳定提升。teacher prototype 的 source top-1 归属准确率仅约 39.4%，部分类别 prototype cosine 高达约 0.99，说明 F_spec prototype 本身仍有明显类别混叠；因此先停在单 seed 正确性检查，不据 Houston18 结果继续调 temperature 或 λ。
