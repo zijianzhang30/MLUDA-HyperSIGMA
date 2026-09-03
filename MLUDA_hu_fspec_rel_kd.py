@@ -68,8 +68,8 @@ def gradient_probe(uda_loss, kd_loss, shared_params, projection):
             'conflict': bool(cos.detach().cpu() < 0)}
 
 def main():
-    ap=argparse.ArgumentParser(); ap.add_argument('--device',default='cuda:0' if torch.cuda.is_available() else 'cpu'); ap.add_argument('--epochs',type=int,default=100); ap.add_argument('--seed',type=int,default=1174); ap.add_argument('--lambda-rel',type=float,default=0.1); ap.add_argument('--schedule',choices=('fixed','anneal'),default='fixed'); ap.add_argument('--cache',type=Path,default=CACHE); ap.add_argument('--spat-cache',type=Path,default=SPAT_CACHE); ap.add_argument('--joint-spatial',action='store_true'); ap.add_argument('--spatial-only',action='store_true'); ap.add_argument('--output',type=Path,default=OUT); ap.add_argument('--diagnostic-epochs',type=int,nargs='*',default=())
-    a=ap.parse_args(); utils.set_seed(a.seed); dev=torch.device(a.device); suffix = f'lambda_{a.lambda_rel:g}' + ('_anneal' if a.schedule == 'anneal' else ''); out=a.output/suffix; out.mkdir(parents=True,exist_ok=True)
+    ap=argparse.ArgumentParser(); ap.add_argument('--device',default='cuda:0' if torch.cuda.is_available() else 'cpu'); ap.add_argument('--epochs',type=int,default=100); ap.add_argument('--seed',type=int,default=1174,help='legacy seed used for both split and optimization unless either explicit seed is supplied'); ap.add_argument('--split-seed',type=int,default=None,help='seed used only by the local Houston13 source split RNG'); ap.add_argument('--optimization-seed',type=int,default=None,help='seed used for model/projection initialization, DataLoader order, and augmentation'); ap.add_argument('--lambda-rel',type=float,default=0.1); ap.add_argument('--schedule',choices=('fixed','anneal'),default='fixed'); ap.add_argument('--cache',type=Path,default=CACHE); ap.add_argument('--spat-cache',type=Path,default=SPAT_CACHE); ap.add_argument('--joint-spatial',action='store_true'); ap.add_argument('--spatial-only',action='store_true'); ap.add_argument('--output',type=Path,default=OUT); ap.add_argument('--diagnostic-epochs',type=int,nargs='*',default=())
+    a=ap.parse_args(); split_seed=a.seed if a.split_seed is None else a.split_seed; optimization_seed=a.seed if a.optimization_seed is None else a.optimization_seed; explicit_seed_pair=a.split_seed is not None or a.optimization_seed is not None; artifact_stem=f'split_{split_seed}_opt_{optimization_seed}' if explicit_seed_pair else f'seed_{a.seed}'; utils.set_seed(optimization_seed); dev=torch.device(a.device); suffix = f'lambda_{a.lambda_rel:g}' + ('_anneal' if a.schedule == 'anneal' else ''); out=a.output/suffix; out.mkdir(parents=True,exist_ok=True)
     if a.joint_spatial and a.spatial_only: raise ValueError('--joint-spatial and --spatial-only are mutually exclusive')
     use_spatial = a.joint_spatial or a.spatial_only; use_spectral = not a.spatial_only
     c=np.load(a.cache,allow_pickle=False) if use_spectral else None
@@ -77,7 +77,7 @@ def main():
     else: sc, sf = None, None; tc = np.load(a.spat_cache,allow_pickle=False)['target_centers']
     spat_cache=np.load(a.spat_cache,allow_pickle=False) if use_spatial else None
     source,gt=utils.load_data_houston(str(ROOT/'datasets/Houston/Houston13.mat'),str(ROOT/'datasets/Houston/Houston13_7gt.mat')); target=hdf5storage.loadmat(str(ROOT/'datasets/Houston/Houston18.mat'))['ori_data']; ds,dt=ILDA(source,target,2,0.009)
-    train_c,train_x,_,train_y,val_c,val_x,_,val_y=paired_source_samples(ds,ds,gt,a.seed)
+    train_c,train_x,_,train_y,val_c,val_x,_,val_y=paired_source_samples(ds,ds,gt,split_seed)
     if use_spectral:
         sm={(int(r),int(col)):i for i,(r,col) in enumerate(sc)}; train_tf=np.stack([sf[sm[(int(r),int(col))]] for r,col in train_c]).astype(np.float32)
     if use_spatial:
@@ -89,10 +89,14 @@ def main():
     else:
         train_loader=DataLoader(TensorDataset(torch.from_numpy(train_x),torch.from_numpy(train_tf),torch.from_numpy(train_y)),batch_size=BATCH_SIZE,shuffle=True,drop_last=True)
     val_loader=DataLoader(TensorDataset(torch.from_numpy(val_x),torch.from_numpy(val_y)),batch_size=BATCH_SIZE)
-    target_x=center_patches(dt,tc,7); target_loader=DataLoader(torch.from_numpy(target_x),batch_size=BATCH_SIZE,shuffle=True,drop_last=True); target_iter=iter(target_loader)
+    target_x=center_patches(dt,tc,7); target_loader=DataLoader(torch.from_numpy(target_x),batch_size=BATCH_SIZE,shuffle=True,drop_last=True)
     model=DSANSS(nBand,7,CLASS_NUM).to(dev); projection=nn.Linear(192,128).to(dev) if use_spectral else None; projection_spatial=nn.Linear(96,768).to(dev) if use_spatial else None; ce=nn.CrossEntropyLoss(); con_s=SupConLoss(temperature=0.1).to(dev); con_t=SupConLoss(temperature=0.1).to(dev); dsh=utils.Domain_Occ_loss().to(dev)
     hist=[]; best={'val_acc':-1.0}; grad_rows=[]; diag_epochs=set(a.diagnostic_epochs); shared_params=[p for p in model.feature_layers.parameters() if p.requires_grad]
     for epoch in range(1,a.epochs+1):
+        # Reinitialize the target iterator at each epoch, matching the
+        # original MLUDA_hu.py sampling protocol. This is the only protocol
+        # change in the iterator-fix sanity check.
+        target_iter=iter(target_loader)
         model.train();
         if projection is not None: projection.train()
         if projection_spatial is not None: projection_spatial.train()
@@ -127,16 +131,16 @@ def main():
             total_loss=uda_obj+active_lambda*joint_rel
             opt.zero_grad(); total_loss.backward(); opt.step(); n=len(sy); total+=n; correct+=(so.argmax(1)==sy).sum().item()
             for k,v in (('total',total_loss),('cls',cls),('scl',scl),('lmmd',lm),('domain',domain),('rel',joint_rel),('rel_spec',rel_spec),('rel_spat',rel_spat)): sums[k]+=v.item()*n
-        active_lambda=scheduled_lambda(epoch, a.lambda_rel, a.schedule); vl,va=eval_source(model,val_loader,dev); row={'epoch':epoch,'lambda_rel':active_lambda,'lambda_rel_base':a.lambda_rel,'schedule':a.schedule,'joint_spatial':a.joint_spatial,'spatial_only':a.spatial_only,'train_total_loss':sums['total']/total,'train_cls_loss':sums['cls']/total,'train_scl_loss':sums['scl']/total,'train_lmmd_loss':sums['lmmd']/total,'train_domain_loss':sums['domain']/total,'train_rel_kd_loss':sums['rel']/total,'train_rel_spec_loss':sums['rel_spec']/total,'train_rel_spat_loss':sums['rel_spat']/total,'train_acc':correct/total,'val_loss':vl,'val_acc':va,'lr':L}; hist.append(row); print(json.dumps({'seed':a.seed,'lambda_rel':active_lambda,'schedule':a.schedule,**row}))
+        active_lambda=scheduled_lambda(epoch, a.lambda_rel, a.schedule); vl,va=eval_source(model,val_loader,dev); row={'epoch':epoch,'split_seed':split_seed,'optimization_seed':optimization_seed,'lambda_rel':active_lambda,'lambda_rel_base':a.lambda_rel,'schedule':a.schedule,'joint_spatial':a.joint_spatial,'spatial_only':a.spatial_only,'train_total_loss':sums['total']/total,'train_cls_loss':sums['cls']/total,'train_scl_loss':sums['scl']/total,'train_lmmd_loss':sums['lmmd']/total,'train_domain_loss':sums['domain']/total,'train_rel_kd_loss':sums['rel']/total,'train_rel_spec_loss':sums['rel_spec']/total,'train_rel_spat_loss':sums['rel_spat']/total,'train_acc':correct/total,'val_loss':vl,'val_acc':va,'lr':L}; hist.append(row); print(json.dumps({'split_seed':split_seed,'optimization_seed':optimization_seed,'lambda_rel':active_lambda,'schedule':a.schedule,**row}))
         if epoch_grad:
             grad_rows.append({'epoch':epoch,'lambda_rel':active_lambda,'num_batches':len(epoch_grad),'mean_cosine':float(np.mean([r['cosine'] for r in epoch_grad])),'mean_uda_norm':float(np.mean([r['uda_norm'] for r in epoch_grad])),'mean_kd_norm':float(np.mean([r['kd_norm'] for r in epoch_grad])),'mean_norm_ratio':float(np.mean([r['norm_ratio'] for r in epoch_grad])),'conflict_ratio':float(np.mean([r['conflict'] for r in epoch_grad])),'mean_projection_kd_norm':float(np.mean([r['projection_kd_norm'] for r in epoch_grad]))})
         if va>best['val_acc']:
-            best=row.copy(); payload={'model':model.state_dict(),'projection':projection.state_dict() if projection is not None else None,'lambda_rel':a.lambda_rel,'schedule':a.schedule,'seed':a.seed,'kd_type':'source_only_relational_fspat' if a.spatial_only else ('source_only_relational_fspec_joint' if a.joint_spatial else 'source_only_relational_fspec'),'diagonal_excluded':True,'target_gt_used_for_training_or_selection':False,'best':best};
+            best=row.copy(); payload={'model':model.state_dict(),'projection':projection.state_dict() if projection is not None else None,'lambda_rel':a.lambda_rel,'schedule':a.schedule,'seed':optimization_seed,'split_seed':split_seed,'optimization_seed':optimization_seed,'kd_type':'source_only_relational_fspat' if a.spatial_only else ('source_only_relational_fspec_joint' if a.joint_spatial else 'source_only_relational_fspec'),'diagonal_excluded':True,'target_gt_used_for_training_or_selection':False,'best':best};
             if projection_spatial is not None: payload['projection_spatial']=projection_spatial.state_dict()
-            torch.save(payload,out/f'seed_{a.seed}_best.pth')
-    (out/f'seed_{a.seed}_history.json').write_text(json.dumps(hist,indent=2)); (out/'source_training_summary.json').write_text(json.dumps({'lambda_rel':a.lambda_rel,'schedule':a.schedule,'joint_spatial':a.joint_spatial,'spatial_only':a.spatial_only,'seed':a.seed,'kd_type':'source_only_relational_fspat' if a.spatial_only else ('source_only_relational_fspec_joint' if a.joint_spatial else 'source_only_relational_fspec'),'diagonal_excluded':True,'target_gt_used_for_training_or_selection':False,'best':best},indent=2));
+            torch.save(payload,out/f'{artifact_stem}_best.pth')
+    (out/f'{artifact_stem}_history.json').write_text(json.dumps(hist,indent=2)); (out/f'{artifact_stem}_source_training_summary.json').write_text(json.dumps({'lambda_rel':a.lambda_rel,'schedule':a.schedule,'joint_spatial':a.joint_spatial,'spatial_only':a.spatial_only,'seed':optimization_seed,'split_seed':split_seed,'optimization_seed':optimization_seed,'kd_type':'source_only_relational_fspat' if a.spatial_only else ('source_only_relational_fspec_joint' if a.joint_spatial else 'source_only_relational_fspec'),'diagonal_excluded':True,'target_gt_used_for_training_or_selection':False,'best':best},indent=2));
     if a.diagnostic_epochs:
-        (out/f'seed_{a.seed}_gradient_diagnostic.json').write_text(json.dumps({'seed':a.seed,'schedule':a.schedule,'diagnostic_epochs':a.diagnostic_epochs,'shared_parameter_scope':'model.feature_layers only; projection excluded from conflict metrics','rows':grad_rows},indent=2))
-    print(json.dumps({'finished':True,'artifact':str(out),'best':best,'gradient_rows':len(grad_rows)}))
+        (out/f'{artifact_stem}_gradient_diagnostic.json').write_text(json.dumps({'seed':optimization_seed,'split_seed':split_seed,'optimization_seed':optimization_seed,'schedule':a.schedule,'diagnostic_epochs':a.diagnostic_epochs,'shared_parameter_scope':'model.feature_layers only; projection excluded from conflict metrics','rows':grad_rows},indent=2))
+    print(json.dumps({'finished':True,'artifact':str(out),'artifact_stem':artifact_stem,'split_seed':split_seed,'optimization_seed':optimization_seed,'best':best,'gradient_rows':len(grad_rows)}))
 
 if __name__=='__main__': main()
