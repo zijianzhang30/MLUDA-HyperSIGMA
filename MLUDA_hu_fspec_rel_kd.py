@@ -74,34 +74,44 @@ def gradient_probe(uda_loss, kd_loss, shared_params, projection):
             'conflict': bool(cos.detach().cpu() < 0)}
 
 def main():
-    ap=argparse.ArgumentParser(); ap.add_argument('--device',default='cuda:0' if torch.cuda.is_available() else 'cpu'); ap.add_argument('--epochs',type=int,default=100); ap.add_argument('--seed',type=int,default=1174,help='legacy seed used for both split and optimization unless either explicit seed is supplied'); ap.add_argument('--split-seed',type=int,default=None,help='seed used only by the local Houston13 source split RNG'); ap.add_argument('--optimization-seed',type=int,default=None,help='seed used for model/projection initialization, DataLoader order, and augmentation'); ap.add_argument('--lambda-rel',type=float,default=0.1); ap.add_argument('--schedule',choices=('fixed','anneal'),default='fixed'); ap.add_argument('--cache',type=Path,default=CACHE); ap.add_argument('--spat-cache',type=Path,default=SPAT_CACHE); ap.add_argument('--spat-relation-cache',type=Path,default=None); ap.add_argument('--joint-spatial',action='store_true'); ap.add_argument('--spatial-only',action='store_true'); ap.add_argument('--spatial-structural',action='store_true'); ap.add_argument('--output',type=Path,default=OUT); ap.add_argument('--diagnostic-epochs',type=int,nargs='*',default=())
+    ap=argparse.ArgumentParser(); ap.add_argument('--device',default='cuda:0' if torch.cuda.is_available() else 'cpu'); ap.add_argument('--epochs',type=int,default=100); ap.add_argument('--seed',type=int,default=1174,help='legacy seed used for both split and optimization unless either explicit seed is supplied'); ap.add_argument('--split-seed',type=int,default=None,help='seed used only by the local Houston13 source split RNG'); ap.add_argument('--optimization-seed',type=int,default=None,help='seed used for model/projection initialization, DataLoader order, and augmentation'); ap.add_argument('--lambda-rel',type=float,default=0.1); ap.add_argument('--schedule',choices=('fixed','anneal'),default='fixed'); ap.add_argument('--cache',type=Path,default=CACHE); ap.add_argument('--spat-cache',type=Path,default=SPAT_CACHE); ap.add_argument('--spat-relation-cache',type=Path,default=None); ap.add_argument('--target-spat-relation-cache',type=Path,default=None); ap.add_argument('--joint-spatial',action='store_true'); ap.add_argument('--spatial-only',action='store_true'); ap.add_argument('--spatial-structural',action='store_true'); ap.add_argument('--target-structural',action='store_true'); ap.add_argument('--source-target-structural',action='store_true'); ap.add_argument('--output',type=Path,default=OUT); ap.add_argument('--diagnostic-epochs',type=int,nargs='*',default=())
     a=ap.parse_args(); split_seed=a.seed if a.split_seed is None else a.split_seed; optimization_seed=a.seed if a.optimization_seed is None else a.optimization_seed; explicit_seed_pair=a.split_seed is not None or a.optimization_seed is not None; artifact_stem=f'split_{split_seed}_opt_{optimization_seed}' if explicit_seed_pair else f'seed_{a.seed}'; utils.set_seed(optimization_seed); dev=torch.device(a.device); suffix = f'lambda_{a.lambda_rel:g}' + ('_anneal' if a.schedule == 'anneal' else ''); out=a.output/suffix; out.mkdir(parents=True,exist_ok=True)
     if a.joint_spatial and a.spatial_only: raise ValueError('--joint-spatial and --spatial-only are mutually exclusive')
     if a.spatial_structural and (a.joint_spatial or not a.spatial_only): raise ValueError('--spatial-structural requires --spatial-only')
+    if a.target_structural and a.source_target_structural: raise ValueError('--target-structural and --source-target-structural are mutually exclusive')
+    if (a.target_structural or a.source_target_structural) and not a.spatial_structural: raise ValueError('target structural modes require --spatial-structural')
     use_spatial = a.joint_spatial or a.spatial_only; use_spectral = not a.spatial_only
     c=np.load(a.cache,allow_pickle=False) if use_spectral else None
     if use_spectral: sc, sf, tc = c['source_centers'], c['source_fspec'], c['target_centers']
     else: sc, sf = None, None; tc = np.load(a.spat_cache,allow_pickle=False)['target_centers']
     spat_cache=np.load(a.spat_cache,allow_pickle=False) if use_spatial else None
-    spat_relation_cache=np.load(a.spat_relation_cache,allow_pickle=False) if a.spatial_structural else None
+    spat_relation_cache=np.load(a.spat_relation_cache,allow_pickle=False) if a.spatial_structural and not a.target_structural else None
+    target_spat_relation_cache=np.load(a.target_spat_relation_cache,allow_pickle=False) if (a.target_structural or a.source_target_structural) else None
     source,gt=utils.load_data_houston(str(ROOT/'datasets/Houston/Houston13.mat'),str(ROOT/'datasets/Houston/Houston13_7gt.mat')); target=hdf5storage.loadmat(str(ROOT/'datasets/Houston/Houston18.mat'))['ori_data']; ds,dt=ILDA(source,target,2,0.009)
     train_c,train_x,_,train_y,val_c,val_x,_,val_y=paired_source_samples(ds,ds,gt,split_seed)
     if use_spectral:
         sm={(int(r),int(col)):i for i,(r,col) in enumerate(sc)}; train_tf=np.stack([sf[sm[(int(r),int(col))]] for r,col in train_c]).astype(np.float32)
     if use_spatial:
         ssm={(int(r),int(col)):i for i,(r,col) in enumerate(spat_cache['source_centers'])}; train_ts=np.stack([spat_cache['source_fspat'][ssm[(int(r),int(col))]] for r,col in train_c]).astype(np.float32)
-    if a.spatial_structural:
+    if a.spatial_structural and not a.target_structural:
         ssm={(int(r),int(col)):i for i,(r,col) in enumerate(spat_relation_cache['source_centers'])}; train_ts=np.stack([spat_relation_cache['source_spatial_relation'][ssm[(int(r),int(col))]] for r,col in train_c]).astype(np.float32)
-    if a.spatial_structural:
+    if a.spatial_structural and not a.target_structural:
         train_loader=DataLoader(TensorDataset(torch.from_numpy(train_x),torch.from_numpy(train_ts),torch.from_numpy(train_y)),batch_size=BATCH_SIZE,shuffle=True,drop_last=True)
     elif a.joint_spatial:
         train_loader=DataLoader(TensorDataset(torch.from_numpy(train_x),torch.from_numpy(train_tf),torch.from_numpy(train_ts),torch.from_numpy(train_y)),batch_size=BATCH_SIZE,shuffle=True,drop_last=True)
+    elif a.target_structural:
+        train_loader=DataLoader(TensorDataset(torch.from_numpy(train_x),torch.from_numpy(train_y)),batch_size=BATCH_SIZE,shuffle=True,drop_last=True)
     elif a.spatial_only:
         train_loader=DataLoader(TensorDataset(torch.from_numpy(train_x),torch.from_numpy(train_ts),torch.from_numpy(train_y)),batch_size=BATCH_SIZE,shuffle=True,drop_last=True)
     else:
         train_loader=DataLoader(TensorDataset(torch.from_numpy(train_x),torch.from_numpy(train_tf),torch.from_numpy(train_y)),batch_size=BATCH_SIZE,shuffle=True,drop_last=True)
     val_loader=DataLoader(TensorDataset(torch.from_numpy(val_x),torch.from_numpy(val_y)),batch_size=BATCH_SIZE)
-    target_x=center_patches(dt,tc,7); target_loader=DataLoader(torch.from_numpy(target_x),batch_size=BATCH_SIZE,shuffle=True,drop_last=True)
+    target_x=center_patches(dt,tc,7)
+    if a.target_structural or a.source_target_structural:
+        tm={(int(r),int(col)):i for i,(r,col) in enumerate(target_spat_relation_cache['target_centers'])}; target_tr=np.stack([target_spat_relation_cache['target_spatial_relation'][tm[(int(r),int(col))]] for r,col in tc]).astype(np.float32)
+        target_loader=DataLoader(TensorDataset(torch.from_numpy(target_x),torch.from_numpy(target_tr)),batch_size=BATCH_SIZE,shuffle=True,drop_last=True)
+    else:
+        target_loader=DataLoader(torch.from_numpy(target_x),batch_size=BATCH_SIZE,shuffle=True,drop_last=True)
     model=DSANSS(nBand,7,CLASS_NUM).to(dev); projection=nn.Linear(192,128).to(dev) if use_spectral else None; projection_spatial=nn.Linear(96,768).to(dev) if use_spatial and not a.spatial_structural else None; ce=nn.CrossEntropyLoss(); con_s=SupConLoss(temperature=0.1).to(dev); con_t=SupConLoss(temperature=0.1).to(dev); dsh=utils.Domain_Occ_loss().to(dev)
     hist=[]; best={'val_acc':-1.0}; grad_rows=[]; diag_epochs=set(a.diagnostic_epochs); shared_params=[p for p in model.feature_layers.parameters() if p.requires_grad]
     for epoch in range(1,a.epochs+1):
@@ -117,14 +127,21 @@ def main():
         if projection_spatial is not None: params.append({'params':projection_spatial.parameters(),'lr':L})
         opt=torch.optim.SGD(params,lr=L,momentum=momentum,weight_decay=l2_decay); sums={k:0.0 for k in ('total','cls','scl','lmmd','domain','rel','rel_spec','rel_spat')}; total=correct=0; epoch_grad=[]
         for batch in train_loader:
-            if a.spatial_structural: sx,sts,sy=batch
+            if a.target_structural: sx,sy=batch; sts=None
+            elif a.spatial_structural: sx,sts,sy=batch
             elif a.joint_spatial: sx,st,sts,sy=batch
             elif a.spatial_only: sx,sts,sy=batch
             else: sx,st,sy=batch
-            try: tx=next(target_iter)
-            except StopIteration: target_iter=iter(target_loader); tx=next(target_iter)
+            try: target_batch=next(target_iter)
+            except StopIteration: target_iter=iter(target_loader); target_batch=next(target_iter)
+            if a.target_structural or a.source_target_structural:
+                tx, ttarget_rel = target_batch
+            else:
+                tx = target_batch; ttarget_rel = None
             if a.joint_spatial:
                 sx,st,sts,sy,tx=sx.to(dev),st.to(dev),sts.to(dev),sy.to(dev),tx.to(dev)
+            elif a.target_structural:
+                sx,sy,tx,ttarget_rel=sx.to(dev),sy.to(dev),tx.to(dev),ttarget_rel.to(dev)
             elif a.spatial_only:
                 sx,sts,sy,tx=sx.to(dev),sts.to(dev),sy.to(dev),tx.to(dev)
             else:
@@ -139,7 +156,12 @@ def main():
             _,s2,_,so2,_,_,_,t2,_,_=model(s0,t0); _,s3,_,so3,_,_,_,t3,_,_=model(sx1,tx1)
             cls=ce(so,sy); pseudo=to.softmax(1).detach().argmax(1); scl=con_s(torch.cat([s2.unsqueeze(1),s3.unsqueeze(1)],1),sy)+con_t(torch.cat([t2.unsqueeze(1),t3.unsqueeze(1)],1),pseudo); lm=mmd.lmmd(sfm,tfm,sy,to.softmax(1),BATCH_SIZE=BATCH_SIZE,CLASS_NUM=CLASS_NUM); domain=dsh(source_out,target_out); active_lambda=scheduled_lambda(epoch, a.lambda_rel, a.schedule); uda_obj=cls+scl+0.01*(2/(1+math.exp(-10*epoch/a.epochs))-1)*lm+domain
             rel_spec=relational_loss(projection,sspec,st) if use_spectral else torch.zeros((),device=dev)
-            rel_spat=spatial_structural_loss(sspat_map,sts) if a.spatial_structural else (relational_loss(projection_spatial,sspat,sts) if use_spatial else torch.zeros((),device=dev))
+            if a.spatial_structural:
+                rel_src = spatial_structural_loss(sspat_map,sts) if not a.target_structural else torch.zeros((),device=dev)
+                rel_tgt = spatial_structural_loss(tspat_map,ttarget_rel.to(dev)) if (a.target_structural or a.source_target_structural) else torch.zeros((),device=dev)
+                rel_spat = rel_src + rel_tgt
+            else:
+                rel_spat=relational_loss(projection_spatial,sspat,sts) if use_spatial else torch.zeros((),device=dev)
             joint_rel=(rel_spec+rel_spat)/2 if a.joint_spatial else (rel_spat if a.spatial_only else rel_spec)
             if epoch in diag_epochs and projection is not None:
                 epoch_grad.append(gradient_probe(uda_obj, joint_rel, shared_params, projection))
@@ -150,10 +172,10 @@ def main():
         if epoch_grad:
             grad_rows.append({'epoch':epoch,'lambda_rel':active_lambda,'num_batches':len(epoch_grad),'mean_cosine':float(np.mean([r['cosine'] for r in epoch_grad])),'mean_uda_norm':float(np.mean([r['uda_norm'] for r in epoch_grad])),'mean_kd_norm':float(np.mean([r['kd_norm'] for r in epoch_grad])),'mean_norm_ratio':float(np.mean([r['norm_ratio'] for r in epoch_grad])),'conflict_ratio':float(np.mean([r['conflict'] for r in epoch_grad])),'mean_projection_kd_norm':float(np.mean([r['projection_kd_norm'] for r in epoch_grad]))})
         if va>best['val_acc']:
-            best=row.copy(); payload={'model':model.state_dict(),'projection':projection.state_dict() if projection is not None else None,'lambda_rel':a.lambda_rel,'schedule':a.schedule,'seed':optimization_seed,'split_seed':split_seed,'optimization_seed':optimization_seed,'kd_type':'source_only_spatial_token_structural' if a.spatial_structural else ('source_only_relational_fspat' if a.spatial_only else ('source_only_relational_fspec_joint' if a.joint_spatial else 'source_only_relational_fspec')),'diagonal_excluded':True,'target_gt_used_for_training_or_selection':False,'best':best};
+            best=row.copy(); structural_type=('target_only_spatial_token_structural' if a.target_structural else ('source_target_spatial_token_structural' if a.source_target_structural else 'source_only_spatial_token_structural')); payload={'model':model.state_dict(),'projection':projection.state_dict() if projection is not None else None,'lambda_rel':a.lambda_rel,'schedule':a.schedule,'seed':optimization_seed,'split_seed':split_seed,'optimization_seed':optimization_seed,'kd_type':structural_type if a.spatial_structural else ('source_only_relational_fspat' if a.spatial_only else ('source_only_relational_fspec_joint' if a.joint_spatial else 'source_only_relational_fspec')),'diagonal_excluded':True,'target_gt_used_for_training_or_selection':False,'best':best};
             if projection_spatial is not None: payload['projection_spatial']=projection_spatial.state_dict()
             torch.save(payload,out/f'{artifact_stem}_best.pth')
-    (out/f'{artifact_stem}_history.json').write_text(json.dumps(hist,indent=2)); (out/f'{artifact_stem}_source_training_summary.json').write_text(json.dumps({'lambda_rel':a.lambda_rel,'schedule':a.schedule,'joint_spatial':a.joint_spatial,'spatial_only':a.spatial_only,'seed':optimization_seed,'split_seed':split_seed,'optimization_seed':optimization_seed,'kd_type':'source_only_relational_fspat' if a.spatial_only else ('source_only_relational_fspec_joint' if a.joint_spatial else 'source_only_relational_fspec'),'diagonal_excluded':True,'target_gt_used_for_training_or_selection':False,'best':best},indent=2));
+    (out/f'{artifact_stem}_history.json').write_text(json.dumps(hist,indent=2)); (out/f'{artifact_stem}_source_training_summary.json').write_text(json.dumps({'lambda_rel':a.lambda_rel,'schedule':a.schedule,'joint_spatial':a.joint_spatial,'spatial_only':a.spatial_only,'target_structural':a.target_structural,'source_target_structural':a.source_target_structural,'seed':optimization_seed,'split_seed':split_seed,'optimization_seed':optimization_seed,'kd_type':(('target_only_spatial_token_structural' if a.target_structural else ('source_target_spatial_token_structural' if a.source_target_structural else 'source_only_spatial_token_structural')) if a.spatial_structural else ('source_only_relational_fspat' if a.spatial_only else ('source_only_relational_fspec_joint' if a.joint_spatial else 'source_only_relational_fspec'))),'diagonal_excluded':True,'target_gt_used_for_training_or_selection':False,'best':best},indent=2));
     if a.diagnostic_epochs:
         (out/f'{artifact_stem}_gradient_diagnostic.json').write_text(json.dumps({'seed':optimization_seed,'split_seed':split_seed,'optimization_seed':optimization_seed,'schedule':a.schedule,'diagnostic_epochs':a.diagnostic_epochs,'shared_parameter_scope':'model.feature_layers only; projection excluded from conflict metrics','rows':grad_rows},indent=2))
     print(json.dumps({'finished':True,'artifact':str(out),'artifact_stem':artifact_stem,'split_seed':split_seed,'optimization_seed':optimization_seed,'best':best,'gradient_rows':len(grad_rows)}))
