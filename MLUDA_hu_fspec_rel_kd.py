@@ -66,8 +66,11 @@ def gradient_probe(uda_loss, kd_loss, shared_params, projection):
     vu, vk = flat(gu, shared_params), flat(gk, shared_params)
     nu, nk = torch.linalg.vector_norm(vu), torch.linalg.vector_norm(vk)
     cos = torch.dot(vu, vk) / (nu * nk).clamp_min(1e-12)
-    gp = torch.autograd.grad(kd_loss, list(projection.parameters()), retain_graph=True, allow_unused=True)
-    vp = flat(gp, list(projection.parameters())) if any(g is not None for g in gp) else vu.new_zeros(1)
+    if projection is not None:
+        pp=list(projection.parameters()); gp = torch.autograd.grad(kd_loss, pp, retain_graph=True, allow_unused=True)
+        vp = flat(gp, pp) if any(g is not None for g in gp) else vu.new_zeros(1)
+    else:
+        vp = vu.new_zeros(1)
     return {'cosine': float(cos.detach().cpu()), 'uda_norm': float(nu.detach().cpu()),
             'kd_norm': float(nk.detach().cpu()), 'norm_ratio': float((nk / nu.clamp_min(1e-12)).detach().cpu()),
             'projection_kd_norm': float(torch.linalg.vector_norm(vp).detach().cpu()),
@@ -108,12 +111,26 @@ def main():
     val_loader=DataLoader(TensorDataset(torch.from_numpy(val_x),torch.from_numpy(val_y)),batch_size=BATCH_SIZE)
     target_x=center_patches(dt,tc,7)
     if a.target_structural or a.source_target_structural:
-        tm={(int(r),int(col)):i for i,(r,col) in enumerate(target_spat_relation_cache['target_centers'])}; target_tr=np.stack([target_spat_relation_cache['target_spatial_relation'][tm[(int(r),int(col))]] for r,col in tc]).astype(np.float32)
+        # target_spatial_relation follows the same target_centers ordering as
+        # the existing MLUDA cache, so no expensive Python coordinate remap is
+        # needed here.
+        target_tr=target_spat_relation_cache['target_spatial_relation'].astype(np.float32, copy=False)
         target_loader=DataLoader(TensorDataset(torch.from_numpy(target_x),torch.from_numpy(target_tr)),batch_size=BATCH_SIZE,shuffle=True,drop_last=True)
     else:
         target_loader=DataLoader(torch.from_numpy(target_x),batch_size=BATCH_SIZE,shuffle=True,drop_last=True)
     model=DSANSS(nBand,7,CLASS_NUM).to(dev); projection=nn.Linear(192,128).to(dev) if use_spectral else None; projection_spatial=nn.Linear(96,768).to(dev) if use_spatial and not a.spatial_structural else None; ce=nn.CrossEntropyLoss(); con_s=SupConLoss(temperature=0.1).to(dev); con_t=SupConLoss(temperature=0.1).to(dev); dsh=utils.Domain_Occ_loss().to(dev)
-    hist=[]; best={'val_acc':-1.0}; grad_rows=[]; diag_epochs=set(a.diagnostic_epochs); shared_params=[p for p in model.feature_layers.parameters() if p.requires_grad]
+    hist=[]; best={'val_acc':-1.0}; grad_rows=[]; diag_epochs=set(a.diagnostic_epochs)
+    # Structural KD acts on the spatial conv branch (conv5-8) before MBCA;
+    # restrict compatibility metrics to these shared parameters. For other
+    # KD variants retain the historical feature_layers scope.
+    if a.spatial_structural:
+        shared_modules=(model.feature_layers.conv5, model.feature_layers.bn5,
+                        model.feature_layers.conv6, model.feature_layers.bn6,
+                        model.feature_layers.conv7, model.feature_layers.bn7,
+                        model.feature_layers.conv8)
+        shared_params=[p for m in shared_modules for p in m.parameters() if p.requires_grad]
+    else:
+        shared_params=[p for p in model.feature_layers.parameters() if p.requires_grad]
     for epoch in range(1,a.epochs+1):
         # Reinitialize the target iterator at each epoch, matching the
         # original MLUDA_hu.py sampling protocol. This is the only protocol
@@ -163,7 +180,7 @@ def main():
             else:
                 rel_spat=relational_loss(projection_spatial,sspat,sts) if use_spatial else torch.zeros((),device=dev)
             joint_rel=(rel_spec+rel_spat)/2 if a.joint_spatial else (rel_spat if a.spatial_only else rel_spec)
-            if epoch in diag_epochs and projection is not None:
+            if epoch in diag_epochs and (projection is not None or a.spatial_structural):
                 epoch_grad.append(gradient_probe(uda_obj, joint_rel, shared_params, projection))
             total_loss=uda_obj+active_lambda*joint_rel
             opt.zero_grad(); total_loss.backward(); opt.step(); n=len(sy); total+=n; correct+=(so.argmax(1)==sy).sum().item()
