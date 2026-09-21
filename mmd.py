@@ -74,13 +74,16 @@ def cmmd(source, target, s_label, t_label, kernel_mul=2.0, kernel_num=5, fix_sig
 def lmmd(source, target, s_label, t_label, kernel_mul=2.0, kernel_num=5, fix_sigma=None, CLASS_NUM=7, BATCH_SIZE=32):
     batch_size = source.size()[0]
     weight_ss, weight_tt, weight_st = Weight.cal_weight(s_label, t_label,batch_size=BATCH_SIZE,CLASS_NUM = CLASS_NUM)
-    weight_ss = torch.from_numpy(weight_ss).cuda()
-    weight_tt = torch.from_numpy(weight_tt).cuda()
-    weight_st = torch.from_numpy(weight_st).cuda()
+    # Keep all LMMD tensors on the feature device.  The original code used
+    # bare .cuda() (implicitly cuda:0), which breaks valid multi-GPU runs.
+    device = source.device
+    weight_ss = torch.from_numpy(weight_ss).to(device)
+    weight_tt = torch.from_numpy(weight_tt).to(device)
+    weight_st = torch.from_numpy(weight_st).to(device)
 
     kernels = guassian_kernel(source, target,
                               kernel_mul=kernel_mul, kernel_num=kernel_num, fix_sigma=fix_sigma)
-    loss = torch.Tensor([0]).cuda()
+    loss = torch.zeros((), device=device)
     if torch.sum(torch.isnan(sum(kernels))):
         return loss
     SS = kernels[:batch_size, :batch_size]

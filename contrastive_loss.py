@@ -48,9 +48,9 @@ class SupConLoss(nn.Module):
         Returns:
             A loss scalar.
         """
-        device = (torch.device('cuda')
-                  if features.is_cuda
-                  else torch.device('cpu'))
+        # Preserve the caller's CUDA ordinal; torch.device('cuda') silently
+        # means cuda:0 and breaks multi-GPU MLUDA runs.
+        device = features.device
 
         if len(features.shape) < 3:
             raise ValueError('`features` needs to be [bsz, n_views, ...],'
